@@ -1,20 +1,41 @@
-FROM public.ecr.aws/lambda/python:3.12
+# Use official Python 3.11 slim image
+FROM python:3.11.11-slim
 
-WORKDIR ${LAMBDA_TASK_ROOT}
+# Set working directory
+WORKDIR /app
 
-# Docling depends on torch; the default PyPI Linux wheel is often CUDA-enabled (~GB).
-# Lambda is CPU-only — install torch/torchvision from PyTorch's CPU index first so
-# `pip install docling` does not replace them with a huge CUDA build.
-RUN pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu \
-    "torch>=2.2.2,<3" "torchvision>=0.0.0,<1"
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    poppler-utils \
+    antiword \
+    netcat-openbsd \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements first for better layer caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-COPY script.sh ${LAMBDA_TASK_ROOT}/script.sh
-RUN chmod 755 ${LAMBDA_TASK_ROOT}/script.sh
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt && \
+    apt-get purge -y --auto-remove build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
-COPY app.py ${LAMBDA_TASK_ROOT}/app.py
+# Copy application code
+COPY . .
 
-CMD ["app.handler"]
+# Copy startup script
+COPY start.sh /start.sh
+
+# Make startup script executable
+RUN chmod +x /start.sh
+
+# Create non-root user
+RUN useradd -m appuser
+
+# Switch to non-root user (recommended)
+USER appuser
+
+# Start application
+CMD ["/start.sh"]

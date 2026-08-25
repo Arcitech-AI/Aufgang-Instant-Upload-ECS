@@ -299,7 +299,7 @@ class _S3LogHandler(logging.Handler):
     caller so that concurrent invocations never collide.
 
     Log path (configurable via LOG_S3_PREFIX env var, default "logs/lambda"):
-        logs/lambda/YYYY/MM/DD/<timestamp>_<request-id>.log
+        logs/lambda/YYYY/MM/DD/_.log
     """
 
     _FMT = logging.Formatter(
@@ -327,7 +327,7 @@ class _S3LogHandler(logging.Handler):
 
     def flush_to_s3(self, bucket: str, key: str) -> bool:
         """
-        Upload buffered log lines to s3://<bucket>/<key>.
+        Upload buffered log lines to s3:///.
         Returns True on success, False if the upload fails or there are no lines.
         Never raises — logging must not break the main request flow.
         """
@@ -2553,7 +2553,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Returns batchItemFailures so SQS retries only failed messages.
 
     A dedicated log file is written to S3 for every invocation:
-        s3://<S3_BUCKET_NAME>/<LOG_S3_PREFIX>/YYYY/MM/DD/<timestamp>_<request-id>.log
+        s3:////YYYY/MM/DD/_.log
     LOG_S3_PREFIX defaults to "logs/lambda".
     """
     _t_handler = time.monotonic()
