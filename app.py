@@ -2443,21 +2443,6 @@ async def run_ocr_pipeline(
             local_path, _dl_size / (1024 * 1024), time.monotonic() - _t,
         )
 
-        # ── Validations ────────────────────────────────────────────────────
-        logger.debug("run_ocr_pipeline: validating page count for ext=%s", file_ext)
-        page_err = validate_page_count(file_ext, local_path)
-        if page_err:
-            _set_status("failed", page_err)
-            logger.warning("run_ocr_pipeline: VALIDATION FAIL (pages) | file_id=%s | reason=%s", file_id, page_err)
-            return {"status": "failed", "file_id": file_id, "reason": page_err}
-
-        logger.debug("run_ocr_pipeline: validating character count for ext=%s", file_ext)
-        char_err = validate_char_count(file_ext, local_path)
-        if char_err:
-            _set_status("failed", char_err)
-            logger.warning("run_ocr_pipeline: VALIDATION FAIL (chars) | file_id=%s | reason=%s", file_id, char_err)
-            return {"status": "failed", "file_id": file_id, "reason": char_err}
-
         logger.debug("run_ocr_pipeline: validations passed for %s", file_id)
 
         # ── Cancellation re-check ──────────────────────────────────────────
