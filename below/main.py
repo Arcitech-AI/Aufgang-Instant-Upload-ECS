@@ -108,7 +108,7 @@ def _require_param(name: str) -> str:
 # =============================================================================
 INSTANT_UPLOAD_COLLECTION = "instantuploadfiles"
 COMPRESS_TARGET_BYTES = 20 * 1024 * 1024          # 20 MB
-MAX_INSTANT_UPLOAD_CHARACTERS = 100_000
+MAX_INSTANT_UPLOAD_CHARACTERS = 200_000
 MAX_INSTANT_UPLOAD_PAGES = 10
 PAGE_COUNT_EXTENSIONS = {"pdf", "docx", "pptx"}
 TEXT_EXTRACT_EXTENSIONS = {"pdf", "docx", "pptx", "txt"}
@@ -1238,6 +1238,40 @@ def _extract_docling_per_page_markdown(file_bytes: bytes) -> Optional[Dict[int, 
                 pass
 
 
+def _extract_docling_for_weak_pages(
+    file_bytes: bytes,
+    weak_page_numbers: List[int],
+) -> Optional[Dict[int, str]]:
+    if not weak_page_numbers or not file_bytes or not HAS_PYMUPDF:
+        return None
+    if not _docling_available():
+        return None
+
+    page_map: Dict[int, int] = {}  # sub-PDF 1-based index → original 1-based page
+    try:
+        src = fitz.open(stream=file_bytes, filetype="pdf")
+        dst = fitz.open()
+        for sub_idx, orig_pn in enumerate(sorted(weak_page_numbers), start=1):
+            if 1 <= orig_pn <= src.page_count:
+                dst.insert_pdf(src, from_page=orig_pn - 1, to_page=orig_pn - 1)
+                page_map[sub_idx] = orig_pn
+        buf = BytesIO()
+        dst.save(buf, garbage=4, deflate=True)
+        sub_pdf_bytes = buf.getvalue()
+        dst.close()
+        src.close()
+    except Exception as e:
+        logger.warning("_extract_docling_for_weak_pages: sub-PDF build failed: %s", e)
+        return None
+
+    if not sub_pdf_bytes or not page_map:
+        return None
+
+    sub_result = _extract_docling_per_page_markdown(sub_pdf_bytes)
+    if not sub_result:
+        return None
+    return {page_map[sp]: md for sp, md in sub_result.items() if sp in page_map}
+
 
 # =============================================================================
 # STANDALONE VECTORIZATION SERVICE
@@ -1504,19 +1538,6 @@ class StandaloneVectorizationService:
                     cached_bytes = await asyncio.to_thread(lambda: open(file_path, "rb").read())
             return cached_bytes
 
-        if file_path:
-            has_text, total_chars = await asyncio.to_thread(_pdf_has_text_sync, file_path)
-        else:
-            has_text, total_chars = False, 0
-            if HAS_PYMUPDF:
-                b = await _bytes()
-                def _check(b):
-                    doc = fitz.open(stream=b, filetype="pdf")
-                    t = sum(len(doc[i].get_text("text").strip()) for i in range(doc.page_count))
-                    doc.close()
-                    return t >= MIN_TEXT_CONTENT_THRESHOLD, t
-                has_text, total_chars = await asyncio.to_thread(_check, b)
-
         page_texts: List[Tuple[str, int]] = []
         try:
             if HAS_PYMUPDF and file_path:
@@ -1546,6 +1567,8 @@ class StandaloneVectorizationService:
                 )
         except Exception as e:
             logger.warning("PDF native extraction failed: %s", e)
+
+        total_chars = sum(len(t) for t, _ in page_texts)
 
         if use_ocr and self.textract_client:
             if not page_texts or total_chars < MIN_TEXT_CONTENT_THRESHOLD:
@@ -1628,23 +1651,29 @@ class StandaloneVectorizationService:
             if vision:
                 return vision
 
-        # Docling enrichment: append per-page markdown when VECTOR_PDF_DOCLING=true
+        # Docling enrichment: run only on weak pages to avoid full-PDF ML overhead
         if VECTOR_PDF_DOCLING and page_texts is not None:
-            dl = await asyncio.to_thread(_extract_docling_per_page_markdown, await _bytes())
-            if dl:
-                merged = []
-                for text, pn in page_texts:
-                    extra = (dl.get(pn) or "").strip()
-                    if extra:
-                        merged.append((f"{text}\n\n[docling]\n{extra}", pn))
-                    else:
-                        merged.append((text, pn))
-                # Add any pages Docling found that native extraction missed
-                existing_pages = {pn for _, pn in page_texts}
-                for pn, extra in sorted(dl.items()):
-                    if pn not in existing_pages:
-                        merged.append((f"[docling]\n{extra}", pn))
-                page_texts = sorted(merged, key=lambda x: x[1])
+            existing_pages = {pn for _, pn in page_texts}
+            weak_pns = [pn for text, pn in page_texts if is_native_text_probably_weak(text)]
+            if not weak_pns:
+                logger.info(
+                    "_extract_pdf_text: all %d pages have strong native text — Docling skipped",
+                    len(page_texts),
+                )
+            else:
+                dl = await asyncio.to_thread(_extract_docling_for_weak_pages, await _bytes(), weak_pns)
+                if dl:
+                    merged = []
+                    for text, pn in page_texts:
+                        extra = (dl.get(pn) or "").strip()
+                        if extra:
+                            merged.append((f"{text}\n\n[docling]\n{extra}", pn))
+                        else:
+                            merged.append((text, pn))
+                    for pn, extra in sorted(dl.items()):
+                        if pn not in existing_pages:
+                            merged.append((f"[docling]\n{extra}", pn))
+                    page_texts = sorted(merged, key=lambda x: x[1])
 
         return page_texts or None
 
@@ -1733,37 +1762,48 @@ class StandaloneVectorizationService:
         sem = asyncio.Semaphore(OCR_SEMAPHORE)
         results = []
 
-        async def _process_page(page_num: int):
+        async def _ocr_one(png: bytes, page_num: int):
             async with sem:
                 try:
-                    def _render():
-                        doc = fitz.open(stream=file_bytes, filetype="pdf")
-                        pix = doc[page_num].get_pixmap(dpi=200)
-                        png = pix.tobytes("png")
-                        doc.close()
-                        return png
-
-                    png = await asyncio.to_thread(_render)
                     img = await asyncio.to_thread(Image.open, BytesIO(png))
                     img = await asyncio.to_thread(_preprocess_pil_image_for_ocr, img)
                     buf = BytesIO()
                     await asyncio.to_thread(img.save, buf, "JPEG", quality=90)
                     jpeg = buf.getvalue()
-                    img.close()
-                    buf.close()
                     resp = await asyncio.to_thread(
                         self.textract_client.detect_document_text,
                         Document={"Bytes": jpeg},
                     )
                     text = "\n".join(b["Text"] for b in resp.get("Blocks", []) if b["BlockType"] == "LINE")
-                    return (normalize_text(text), page_num + 1) if text.strip() else None
+                    return (normalize_text(text), page_num) if text.strip() else None
                 except Exception as e:
-                    logger.warning("Page %d OCR failed: %s", page_num + 1, e)
+                    logger.warning("Page %d OCR failed: %s", page_num, e)
                     return None
 
-        for r in await asyncio.gather(*[_process_page(i) for i in range(total_pages)]):
-            if r:
-                results.append(r)
+        # Render OCR_SEMAPHORE pages per batch — keeps peak PNG memory bounded
+        # instead of holding all pages in memory at once.
+        for batch_start in range(0, total_pages, OCR_SEMAPHORE):
+            batch_indices = list(range(batch_start, min(batch_start + OCR_SEMAPHORE, total_pages)))
+
+            def _render(indices=batch_indices):
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                pages = []
+                for i in indices:
+                    pix = doc[i].get_pixmap(dpi=200)
+                    pages.append((pix.tobytes("png"), i + 1))
+                doc.close()
+                return pages
+
+            try:
+                batch = await asyncio.to_thread(_render)
+            except Exception as e:
+                logger.warning("_extract_pdf_ocr_page_by_page: render batch %d failed: %s", batch_start, e)
+                continue
+
+            for r in await asyncio.gather(*[_ocr_one(png, pn) for png, pn in batch]):
+                if r:
+                    results.append(r)
+
         return sorted(results, key=lambda x: x[1]) or None
 
     async def _extract_pdf_ocr_for_pages(
@@ -1780,24 +1820,16 @@ class StandaloneVectorizationService:
         sem = asyncio.Semaphore(OCR_SEMAPHORE)
         results = []
 
-        async def _process_page(pn: int):
+        sorted_pns = sorted(page_numbers)
+
+        async def _ocr_one(png: bytes, pn: int):
             async with sem:
                 try:
-                    def _render():
-                        doc = fitz.open(stream=file_bytes, filetype="pdf")
-                        pix = doc[pn - 1].get_pixmap(dpi=200)
-                        png = pix.tobytes("png")
-                        doc.close()
-                        return png
-
-                    png = await asyncio.to_thread(_render)
                     img = await asyncio.to_thread(Image.open, BytesIO(png))
                     img = await asyncio.to_thread(_preprocess_pil_image_for_ocr, img)
                     buf = BytesIO()
                     await asyncio.to_thread(img.save, buf, "JPEG", quality=90)
                     jpeg = buf.getvalue()
-                    img.close()
-                    buf.close()
                     resp = await asyncio.to_thread(
                         self.textract_client.detect_document_text,
                         Document={"Bytes": jpeg},
@@ -1811,9 +1843,30 @@ class StandaloneVectorizationService:
                     logger.warning("Selective OCR page %d failed: %s", pn, e)
                     return None
 
-        for r in await asyncio.gather(*[_process_page(pn) for pn in page_numbers]):
-            if r:
-                results.append(r)
+        # Render OCR_SEMAPHORE pages per batch — bounds peak PNG memory.
+        for batch_start in range(0, len(sorted_pns), OCR_SEMAPHORE):
+            batch_pns = sorted_pns[batch_start:batch_start + OCR_SEMAPHORE]
+
+            def _render(pns=batch_pns):
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                pages = []
+                for pn in pns:
+                    if 1 <= pn <= doc.page_count:
+                        pix = doc[pn - 1].get_pixmap(dpi=200)
+                        pages.append((pix.tobytes("png"), pn))
+                doc.close()
+                return pages
+
+            try:
+                batch = await asyncio.to_thread(_render)
+            except Exception as e:
+                logger.warning("_extract_pdf_ocr_for_pages: render batch failed: %s", e)
+                continue
+
+            for r in await asyncio.gather(*[_ocr_one(png, pn) for png, pn in batch]):
+                if r:
+                    results.append(r)
+
         return sorted(results, key=lambda x: x[1]) or None
 
     # ── Image / TIFF / BIN ─────────────────────────────────────────────────────
@@ -2543,18 +2596,6 @@ async def run_ocr_pipeline(
             logger.info("run_ocr_pipeline: %s cancelled before vectorize — aborting", file_id)
             _cleanup_cancelled(fresh or file_doc, collection_name)
             return {"status": "skipped", "file_id": file_id, "reason": "cancelled_before_vectorize"}
-
-        # ── Compression ────────────────────────────────────────────────────
-        _size_before = os.path.getsize(local_path)
-        local_path = compress_file_if_needed(local_path, file_ext, s3_key, file_id)
-        _size_after = os.path.getsize(local_path)
-        if _size_after < _size_before:
-            logger.info(
-                "run_ocr_pipeline: compression applied | %.2f MB → %.2f MB",
-                _size_before / (1024 * 1024), _size_after / (1024 * 1024),
-            )
-        else:
-            logger.debug("run_ocr_pipeline: no compression applied for %s", file_id)
 
         # ── Vectorize ──────────────────────────────────────────────────────
         logger.info("run_ocr_pipeline: starting vectorization for %s", file_id)
