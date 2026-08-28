@@ -1,41 +1,38 @@
-# Use official Python 3.11 slim image
-FROM python:3.11.11-slim
+# syntax=docker/dockerfile:1
 
-# Set working directory
-WORKDIR /app
+FROM python:3.11-slim AS builder
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
-    poppler-utils \
-    antiword \
-    netcat-openbsd \
-    curl \
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better layer caching
-COPY requirements.txt .
+WORKDIR /build
+COPY requirements-cpu.txt requirements.txt ./
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt && \
-    apt-get purge -y --auto-remove build-essential && \
-    rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --requirement requirements-cpu.txt \
+    && /opt/venv/bin/python -m pip install --requirement requirements.txt \
+    && /opt/venv/bin/python -m pip check \
+    && /opt/venv/bin/python -m pip uninstall --yes pip
 
-# Copy application code
-COPY . .
+FROM python:3.11-slim AS runtime
 
-# Copy startup script
-COPY start.sh /start.sh
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Make startup script executable
-RUN chmod +x /start.sh
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends antiword poppler-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 appuser
 
-# Create non-root user
-RUN useradd -m appuser
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+COPY --chown=appuser:appuser main.py ./
 
-# Switch to non-root user (recommended)
 USER appuser
 
-# Start application
-CMD ["/start.sh"]
+CMD [ "python", "main.py" ]

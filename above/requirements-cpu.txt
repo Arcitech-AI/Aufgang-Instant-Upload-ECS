@@ -1,0 +1,7 @@
+# Keep the PyTorch index scoped to CPU-only ML dependencies. Installing these
+# first prevents Docling from resolving substantially larger CUDA wheels.
+--index-url https://download.pytorch.org/whl/cpu
+
+# Officially supported PyTorch/Torchvision version pair.
+torch==2.12.1
+torchvision==0.27.1

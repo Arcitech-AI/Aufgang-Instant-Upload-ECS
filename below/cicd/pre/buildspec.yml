@@ -1,0 +1,27 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+    ECR_REPO: 615299760779.dkr.ecr.us-east-1.amazonaws.com/below20mb-file-vectorization
+    IMAGE_TAG: PRE
+    BUILD_CONTEXT: below
+    BUILDER_NAME: lambda-builder
+
+phases:
+  pre_build:
+    commands:
+      - docker buildx rm "$BUILDER_NAME" >/dev/null 2>&1 || true
+      - docker buildx create --name "$BUILDER_NAME" --driver docker-container --use
+      - docker buildx inspect --bootstrap
+      - ECR_REGISTRY="${ECR_REPO%%/*}"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  build:
+    commands:
+      - docker buildx build --platform linux/amd64 --pull --provenance=false --sbom=false --no-cache --tag "$ECR_REPO:$IMAGE_TAG" --load "$CODEBUILD_SRC_DIR/$BUILD_CONTEXT"
+  post_build:
+    commands:
+      - docker push "$ECR_REPO:$IMAGE_TAG"
+    finally:
+      - docker logout "$ECR_REGISTRY" >/dev/null 2>&1 || true
+      - docker buildx rm "$BUILDER_NAME" >/dev/null 2>&1 || true

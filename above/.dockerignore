@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!requirements-cpu.txt
+!requirements.txt
+!main.py

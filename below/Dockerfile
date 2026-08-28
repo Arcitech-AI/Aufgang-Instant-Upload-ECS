@@ -1,20 +1,22 @@
-FROM public.ecr.aws/lambda/python:3.12
+# syntax=docker/dockerfile:1
 
-WORKDIR ${LAMBDA_TASK_ROOT}
+FROM public.ecr.aws/lambda/python:3.12 AS builder
 
-# Docling depends on torch; the default PyPI Linux wheel is often CUDA-enabled (~GB).
-# Lambda is CPU-only — install torch/torchvision from PyTorch's CPU index first so
-# `pip install docling` does not replace them with a huge CUDA build.
-RUN pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu \
-    "torch>=2.2.2,<3" "torchvision>=0.0.0,<1"
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /build
+COPY requirements-cpu.txt requirements.txt ./
 
-COPY script.sh ${LAMBDA_TASK_ROOT}/script.sh
-RUN chmod 755 ${LAMBDA_TASK_ROOT}/script.sh
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/python -m pip install --requirement requirements-cpu.txt \
+    && /opt/venv/bin/python -m pip install --requirement requirements.txt \
+    && /opt/venv/bin/python -m pip check \
+    && /opt/venv/bin/python -m pip uninstall --yes pip
 
-COPY app.py ${LAMBDA_TASK_ROOT}/app.py
+FROM public.ecr.aws/lambda/python:3.12 AS runtime
 
-CMD ["app.handler"]
+COPY --from=builder /opt/venv/lib/python3.12/site-packages/ ${LAMBDA_TASK_ROOT}/
+COPY main.py ${LAMBDA_TASK_ROOT}/
+
+CMD [ "main.handler" ]
