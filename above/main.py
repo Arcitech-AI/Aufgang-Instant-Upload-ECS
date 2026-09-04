@@ -109,7 +109,7 @@ def _require_param(name: str) -> str:
 INSTANT_UPLOAD_COLLECTION = "instantuploadfiles"
 COMPRESS_TARGET_BYTES = 20 * 1024 * 1024          # 20 MB
 MAX_INSTANT_UPLOAD_CHARACTERS = 100_000
-MAX_INSTANT_UPLOAD_PAGES = 10
+MAX_INSTANT_UPLOAD_PAGES = None  # no page limit
 PAGE_COUNT_EXTENSIONS = {"pdf", "docx", "pptx"}
 TEXT_EXTRACT_EXTENSIONS = {"pdf", "docx", "pptx", "txt"}
 OCR_LARGE_FILE_THRESHOLD_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -848,7 +848,7 @@ def validate_page_count(file_ext: str, path: str) -> Optional[str]:
     if file_ext not in PAGE_COUNT_EXTENSIONS:
         return None
     page_count = _count_file_pages(file_ext, path=path)
-    if page_count is not None and page_count > MAX_INSTANT_UPLOAD_PAGES:
+    if MAX_INSTANT_UPLOAD_PAGES is not None and page_count is not None and page_count > MAX_INSTANT_UPLOAD_PAGES:
         return f"File has {page_count} pages; max is {MAX_INSTANT_UPLOAD_PAGES} for instant upload."
     return None
 
